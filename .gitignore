@@ -1,0 +1,10 @@
+.codex-hook-log.tsv
+.codex-audit-receipts.tsv
+worklog/claude-reviews/
+*.bak.*
+*.tar
+*.tar.gz
+*.zip
+.DS_Store
+._*
+__MACOSX/
