@@ -28,7 +28,7 @@ fi
 ARTIFACT="$1"
 shift
 
-FOCUS="Review this artifact as the independent Claude gate. Prioritize false-pass paths, missing evidence, publish/readiness claims, and whether the gate status is justified."
+FOCUS="Review this artifact as the independent REVIEWER (Adoption gate). Prioritize false-pass paths, missing evidence, publish/readiness claims, and whether the declared gate status is justified."
 OUTPUT=""
 REQUIRE_APPROVE=0
 BUDGET="${CLAUDE_REVIEW_BUDGET_USD:-1.00}"
@@ -92,7 +92,7 @@ trap 'rm -f "$PROMPT"' EXIT
 
 {
   cat <<EOF
-You are Claude performing an independent review of a Codex-authored high-risk artifact.
+You are acting as the REVIEWER for the Adoption gate, performing an independent review of an artifact authored by the PRIMARY agent (the user-facing session that produced this draft). You and PRIMARY may run different runtimes; assume PRIMARY's reasoning is not visible to you and judge only the artifact.
 
 Target artifact:
 $ARTIFACT_ABS
@@ -127,8 +127,13 @@ EOF
 
 log "$ARTIFACT_ABS" queued "output=$OUTPUT model=$MODEL"
 
+# AGENT_ROLE=tool tells the spawned `claude -p`'s SessionStart hooks NOT to
+# overwrite .active-binding.md — this is a sub-tool spawn (reverse review),
+# not a new top-level Claude session. Without the env var, when invoked from
+# a Codex session, the child Claude would flip the binding to PRIMARY=Claude
+# for the rest of the parent Codex session.
 set +e
-claude -p \
+AGENT_ROLE=tool claude -p \
   --output-format text \
   --model "$MODEL" \
   --max-budget-usd "$BUDGET" \

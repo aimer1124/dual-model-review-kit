@@ -1,6 +1,9 @@
 .codex-hook-log.tsv
 .codex-audit-receipts.tsv
+.active-binding.md
 worklog/claude-reviews/
+worklog/codex-reviews/
+worklog/claude-self-adversarial/
 *.bak.*
 *.tar
 *.tar.gz

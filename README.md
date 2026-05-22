@@ -2,12 +2,22 @@
 
 This kit packages a practical Codex + Claude review workflow that can be copied into another repository.
 
-The operating model is:
+## Operating Model
 
-- Codex is the primary execution agent for source reading, local implementation, tests, draft artifacts, and first-pass adversarial review.
-- Claude is the independent gate reviewer for high-risk artifacts such as formal plans, QA verdict packages, external publish packages, test skip/baseline changes, and AI-finding adoption.
-- Findings from either model are not accepted from summaries alone. Source evidence must be opened and verified before adoption.
-- High-risk artifacts remain `Draft` or `Needs attention` until a gate review returns `Verdict: approve` or the owner records an explicit override.
+Roles are decoupled from agent names so the binding can flip without rewriting governance or scripts:
+
+- **PRIMARY** — the user-facing session. Drafts artifacts, runs source reading and local implementation, and owns the Exit gate via its own adversarial self-review.
+- **REVIEWER** — the independent gate reviewer. Runs the Adoption gate for high-risk artifacts (formal plans, QA verdict packages, external publish packages, test skip/baseline changes, AI-finding adoption).
+- **PUBLISHER** — the agent that finalizes external writes (task trackers, chat systems, final verdicts, publish boundaries). Always the last step after an Adoption-gate approve.
+
+Default binding when both agents are available: `PRIMARY=Codex`, `REVIEWER=Claude`, `PUBLISHER=Claude`. The kit also supports the inverted binding `PRIMARY=Claude`, `REVIEWER=Codex` and ships symmetric scripts for both directions. The current binding is written to `.active-binding.md` at the repo root by whichever entry point launched the session.
+
+Two stage-gates govern artifact state:
+
+- **Exit gate** unlocks "may start implementing / may deliver first pass". Owned by `PRIMARY`. The draft stays `Draft` even after Exit.
+- **Adoption gate** unlocks "may publish externally / mark `Reviewed`". Owned by `REVIEWER`. Required before any external write or before citing the artifact as adopted.
+
+Findings from either side are not accepted from summaries alone. Source evidence must be opened and verified before adoption.
 
 ## Contents
 
@@ -15,12 +25,16 @@ The operating model is:
 dual-model-review-kit/
   install.sh
   scripts/
-    run-codex-with-context.sh
-    run-claude-artifact-review.sh
+    run-codex-with-context.sh             # Codex wrapper + Exit gate for PRIMARY=Codex
+    run-claude-artifact-review.sh         # Adoption gate when REVIEWER=Claude
+    run-codex-artifact-review.sh          # Adoption gate when REVIEWER=Codex
+    run-claude-self-adversarial.sh        # Exit gate for PRIMARY=Claude
+    run-codex-chat-plan-review.sh         # chat-plan Adoption gate when REVIEWER=Codex
     codex-hook-log.sh
     check-codex-publish-gate.sh
     record-codex-audit-receipt.sh
   claude-hooks/
+    set-active-binding.sh                 # SessionStart: writes .active-binding.md
     codex-auto-review.sh
     codex-preflight.sh
   claude-templates/
@@ -74,7 +88,43 @@ The installer copies:
 
 Existing target files are backed up as `*.bak.<timestamp>` before being replaced.
 
-Hook scripts are copied into `.claude/hooks/`, but they are not guaranteed to be active in every Claude Code setup. Register them in your local Claude Code hook settings if your environment does not auto-discover hooks.
+Hook scripts are copied into `.claude/hooks/`, but they are not guaranteed to be active in every Claude Code setup. Register them in your local Claude Code hook settings if your environment does not auto-discover hooks. In particular, register `set-active-binding.sh` in the SessionStart chain so `PRIMARY=Claude` is declared whenever you enter a Claude session.
+
+Also add to your project `.gitignore`:
+
+```text
+.active-binding.md
+.codex-hook-log.tsv
+.codex-audit-receipts.tsv
+worklog/claude-reviews/
+worklog/codex-reviews/
+worklog/claude-self-adversarial/
+```
+
+## Active Binding
+
+`.active-binding.md` at the repo root holds the live binding:
+
+```text
+PRIMARY=Codex
+REVIEWER=Claude
+PUBLISHER=Claude
+BOUND_AT=...
+BOUND_BY=codex-wrapper | claude-session-start-hook
+```
+
+Two entry points write this file:
+
+- `scripts/run-codex-with-context.sh` writes it on every wrapper invocation (so a Codex task sees `PRIMARY=Codex`).
+- `.claude/hooks/set-active-binding.sh` writes it on Claude SessionStart (so a Claude session sees `PRIMARY=Claude`).
+
+The file is gitignored and per-machine. Read it programmatically when deciding which gate tool to call.
+
+## Sub-Tool Invocation Contract
+
+Any script that spawns the *other* agent as a sub-tool (reverse review, Exit-gate self-adversarial, health check, PostToolUse review queue) MUST export `AGENT_ROLE=tool` before launching the child. The binding writers (`set-active-binding.sh` and the Codex wrapper) skip writing `.active-binding.md` when this env var is set, preserving the parent session's binding.
+
+Forgetting `AGENT_ROLE=tool` is a real bug: a sub-tool spawn silently flips the binding mid-session, and every downstream gate-tool lookup in the parent session resolves to the wrong script. All scripts in this kit set the variable; new sub-tool callers must follow the same convention.
 
 ## Model Configuration
 
@@ -91,10 +141,11 @@ CODEX_MODEL_CHEAP_REVIEW=gpt-5.4-mini
 CODEX_EFFORT_CHEAP_REVIEW=medium
 ```
 
-Example:
+Claude-side scripts honor:
 
 ```bash
-CODEX_MODEL_DEFAULT=<your-model> scripts/run-codex-with-context.sh --profile default task --background "Review this change."
+CLAUDE_REVIEW_MODEL=sonnet
+CLAUDE_REVIEW_BUDGET_USD=1.00
 ```
 
 ## Core Commands
@@ -111,32 +162,61 @@ Run a deeper Codex task:
 scripts/run-codex-with-context.sh --profile deep task --background --write "Investigate this cross-module issue and propose a bounded fix."
 ```
 
-Review the current working tree:
+Exit-gate self-review for the current working tree (when `PRIMARY=Codex`):
 
 ```bash
-scripts/run-codex-with-context.sh adversarial-review --background --scope working-tree "Focus on regressions, missing tests, and false-pass paths."
+scripts/run-codex-with-context.sh adversarial-review --background --scope working-tree \
+  "Focus on regressions, missing tests, and false-pass paths."
 ```
 
-Review a branch against `origin/main`:
-
-```bash
-scripts/run-codex-with-context.sh adversarial-review --background --scope branch --base origin/main "Focus on behavior changes and release risk."
-```
-
-Review a plan file:
+Exit-gate self-review for a plan file:
 
 ```bash
 scripts/run-codex-with-context.sh adversarial-plan docs/plans/example.md --background \
   "Treat the author as confident-but-wrong. Focus on missing evidence, false-pass paths, and silent assumptions."
 ```
 
-Do not use `adversarial-review` for plan files. Use `adversarial-plan`; it isolates the plan body from unrelated working-tree state.
+Exit-gate self-review when `PRIMARY=Claude`:
 
-Run Claude gate review on a high-risk artifact:
+```bash
+scripts/run-claude-self-adversarial.sh docs/plans/example.md --require-approve
+```
+
+Adoption gate when `REVIEWER=Claude` (default):
 
 ```bash
 scripts/run-claude-artifact-review.sh docs/plans/example.md --require-approve
 ```
+
+Adoption gate when `REVIEWER=Codex` (inverted binding):
+
+```bash
+scripts/run-codex-artifact-review.sh docs/plans/example.md --require-approve
+```
+
+Adoption gate for a chat plan when `REVIEWER=Codex`:
+
+```bash
+echo "<plan markdown body>" | scripts/run-codex-chat-plan-review.sh --require-approve
+# or
+scripts/run-codex-chat-plan-review.sh path/to/plan.md --require-approve
+```
+
+All four review entry points emit a final line of the form:
+
+```text
+Verdict: approve | needs-attention | block
+```
+
+## Gate Tool Selection
+
+Resolve the right tool from the binding, not from hard-coded model names:
+
+| Gate                          | `PRIMARY=Codex`                                              | `PRIMARY=Claude`                          |
+| ----------------------------- | ------------------------------------------------------------ | ----------------------------------------- |
+| Exit gate                     | `run-codex-with-context.sh adversarial-review` (or `adversarial-plan` for plan files) | `run-claude-self-adversarial.sh`          |
+| Adoption gate — saved file    | `run-claude-artifact-review.sh`                              | `run-codex-artifact-review.sh`            |
+| Adoption gate — chat plan     | Claude session-side review skill / repeat through saved file | `run-codex-chat-plan-review.sh`           |
 
 ## Gate Artifact Status
 
@@ -154,24 +234,38 @@ Rejected findings:
 Remaining risks:
 ```
 
+State transitions:
+
+- `Draft` → `Draft` after Exit gate approves (implementation may start, artifact is not yet adopted).
+- `Draft` → `Reviewed` after Adoption gate approves.
+- `Draft` → `Needs attention` after Adoption gate returns findings; back to `Draft` after revisions; rerun the Adoption gate.
+- `Override` records an explicit owner decision to bypass a gate. The artifact must name the override owner and reason.
+
 ## Standard Workflow
 
-1. Codex creates or updates the artifact.
-2. Run Codex adversarial review.
-3. Read the Codex result.
-4. Source-verify every material finding before adoption.
-5. Update the artifact with evidence, deltas, and gate status.
-6. Run Claude artifact review with `--require-approve`.
-7. If Claude returns `needs-attention`, fix only source-verified H/M findings, then rerun.
-8. Mark the artifact `Reviewed` only after `Verdict: approve`, or record an explicit owner override.
+1. `PRIMARY` creates or updates the artifact.
+2. Run the Exit-gate tool for the current binding. Address findings in source.
+3. Once Exit gate returns `approve`, `PRIMARY` may start implementing and may deliver a first pass.
+4. Run the Adoption-gate tool for the current binding (`--require-approve`).
+5. Source-verify every material finding before adoption. Update the artifact with evidence, deltas, and the new gate status.
+6. If the Adoption gate returns `needs-attention`, fix only source-verified H/M findings, then rerun. A third round is allowed only to confirm closure after material changes.
+7. Mark the artifact `Reviewed` only after `Verdict: approve`, or record an explicit owner override with a written reason.
+8. PUBLISHER finalizes external writes (only after `Reviewed`).
 
 ## Logs And Receipts
 
-Wrapper and gate events are logged to:
+Wrapper, hook, and gate events are logged to:
 
 ```text
 .codex-hook-log.tsv
 ```
+
+Hook tags emitted by this kit:
+
+- `wrapper` — `run-codex-with-context.sh` invocations.
+- `claude-artifact-review` — Adoption gate, REVIEWER=Claude.
+- `codex-artifact-review` — Adoption gate, REVIEWER=Codex.
+- `claude-self-adversarial` — Exit gate, PRIMARY=Claude.
 
 For external publish flows that need an extra receipt:
 

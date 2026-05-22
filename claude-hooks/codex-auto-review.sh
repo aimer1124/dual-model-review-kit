@@ -89,7 +89,10 @@ Return concise pass items, issues, and ambiguities. If healthy, say so briefly.
 EOF
 )
 
-( nohup "$WRAPPER" --profile cheap-review task --background "$FOCUS_PROMPT" >/dev/null 2>&1 & ) &
+# AGENT_ROLE=tool prevents the wrapper from flipping .active-binding.md —
+# this is a Claude-session PostToolUse spawning Codex as REVIEWER, not a new
+# top-level Codex session.
+( nohup env AGENT_ROLE=tool "$WRAPPER" --profile cheap-review task --background "$FOCUS_PROMPT" >/dev/null 2>&1 & ) &
 hooklog "$FILE" "queued" "$MATCH"
 
 MSG="Codex file-focused review queued for $MATCH edit ($SHORT). Poll status and retrieve result through the Codex wrapper."
