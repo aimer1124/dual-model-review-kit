@@ -10,7 +10,7 @@ Roles are decoupled from agent names so the binding can flip without rewriting g
 - **REVIEWER** — the independent gate reviewer. Runs the Adoption gate for high-risk artifacts (formal plans, QA verdict packages, external publish packages, test skip/baseline changes, AI-finding adoption).
 - **PUBLISHER** — the agent that finalizes external writes (task trackers, chat systems, final verdicts, publish boundaries). Always the last step after an Adoption-gate approve.
 
-Default binding when both agents are available: `PRIMARY=Codex`, `REVIEWER=Claude`, `PUBLISHER=Claude`. The kit also supports the inverted binding `PRIMARY=Claude`, `REVIEWER=Codex` and ships symmetric scripts for both directions. The current binding is written to `.active-binding.md` at the repo root by whichever entry point launched the session.
+Default binding when both agents are available: `PRIMARY=Codex`, `REVIEWER=Claude`, `PUBLISHER=Claude`. The kit also supports the inverted binding `PRIMARY=Claude`, `REVIEWER=Codex` and ships symmetric scripts for both directions. The current binding is written to `.active-binding.md` at the repo root by whichever top-level entry point launched the session.
 
 Two stage-gates govern artifact state:
 
@@ -25,6 +25,7 @@ Findings from either side are not accepted from summaries alone. Source evidence
 dual-model-review-kit/
   install.sh
   scripts/
+    enter-codex-session.sh               # Codex API / in-app session entry marker
     run-codex-with-context.sh             # Codex wrapper + Exit gate for PRIMARY=Codex
     run-claude-artifact-review.sh         # Adoption gate when REVIEWER=Claude
     run-codex-artifact-review.sh          # Adoption gate when REVIEWER=Codex
@@ -51,7 +52,7 @@ dual-model-review-kit/
 - `node` available on `PATH`.
 - Claude CLI available as `claude`.
 - Codex companion script available through the Claude Code Codex plugin, or set `CX_SCRIPT=/absolute/path/to/codex-companion.mjs`.
-- Optional: a repository-specific `.codex-context.md` and `scripts/export-codex-context.sh`. The wrapper works without them, but context refresh is skipped.
+- Optional: a repository-specific `.codex-context.md` and `scripts/export-codex-context.sh`. The Codex entry scripts work without them, but context refresh is skipped.
 
 ## Before Publishing This Kit
 
@@ -115,14 +116,23 @@ BOUND_BY=codex-wrapper | claude-session-start-hook
 
 Two entry points write this file:
 
-- `scripts/run-codex-with-context.sh` writes it on every wrapper invocation (so a Codex task sees `PRIMARY=Codex`).
+- `scripts/enter-codex-session.sh` writes it for Codex API / in-app sessions that bypass the companion wrapper.
+- `scripts/run-codex-with-context.sh` calls `enter-codex-session.sh` on every top-level wrapper invocation (so a Codex task sees `PRIMARY=Codex`).
 - `.claude/hooks/set-active-binding.sh` writes it on Claude SessionStart (so a Claude session sees `PRIMARY=Claude`).
 
 The file is gitignored and per-machine. Read it programmatically when deciding which gate tool to call.
 
+If a Codex entry point does not run through the wrapper, run this before making gate decisions:
+
+```bash
+scripts/enter-codex-session.sh codex-api
+```
+
+The helper also refreshes `.codex-context.md` when `scripts/export-codex-context.sh` exists and the context is missing or older than 24h.
+
 ## Sub-Tool Invocation Contract
 
-Any script that spawns the *other* agent as a sub-tool (reverse review, Exit-gate self-adversarial, health check, PostToolUse review queue) MUST export `AGENT_ROLE=tool` before launching the child. The binding writers (`set-active-binding.sh` and the Codex wrapper) skip writing `.active-binding.md` when this env var is set, preserving the parent session's binding.
+Any script that spawns the *other* agent as a sub-tool (reverse review, Exit-gate self-adversarial, health check, PostToolUse review queue) MUST export `AGENT_ROLE=tool` before launching the child. The binding writers (`set-active-binding.sh`, `enter-codex-session.sh`, and the Codex wrapper) skip writing `.active-binding.md` when this env var is set, preserving the parent session's binding.
 
 Forgetting `AGENT_ROLE=tool` is a real bug: a sub-tool spawn silently flips the binding mid-session, and every downstream gate-tool lookup in the parent session resolves to the wrong script. All scripts in this kit set the variable; new sub-tool callers must follow the same convention.
 
@@ -154,6 +164,12 @@ Run a normal Codex task:
 
 ```bash
 scripts/run-codex-with-context.sh --profile default task --background --write "Implement the requested change and verify it."
+```
+
+Mark a Codex API / in-app session as the top-level PRIMARY before gate selection:
+
+```bash
+scripts/enter-codex-session.sh codex-api
 ```
 
 Run a deeper Codex task:
