@@ -109,31 +109,81 @@ log() {
 
 log "$ARTIFACT_ABS" queued "output=$OUTPUT profile=$PROFILE"
 
+REVIEW_FOCUS=$(cat <<EOF
+$FOCUS
+
+Artifact review output contract:
+- Start with: Artifact: $ARTIFACT_ABS
+- Then: Focus: <one concise sentence describing the review focus>
+- Include sections named exactly: Evidence, Gaps, Risks — each section header MUST be on its own line formatted as either "Evidence:" (trailing colon) or "**Evidence**" (bold); a bare unformatted word fails the report validator
+- Evidence must cite source opened in this turn using file:line, command output, log line, screenshot, API response, or database row. If no material issue exists, cite the source evidence that justifies approval. At least one citation MUST use the exact colon format "path/to/file.ext:NN" (e.g. src/config.ts:42) — prose like "lines 28-60" alone fails the report validator.
+- Gaps must list anything not checked and why.
+- Risks must call out false PASS / false FAIL / environment drift / deploy mismatch / data cleanup or external publish risk where relevant.
+- End with exactly one standalone verdict line: Verdict: approve OR Verdict: needs-attention OR Verdict: block
+- Keep the report under 220 lines.
+EOF
+)
+
+# Use the wrapper's adversarial-plan channel: it composes the prompt from
+# .claude/templates/codex-adversarial-plan.md, points Codex at the artifact
+# path, and avoids the working-tree git-diff injection that would otherwise
+# leak unrelated prior-session noise into the review.
+#
 # AGENT_ROLE=tool tells the wrapper NOT to overwrite .active-binding.md.
 # This is a sub-tool spawn from the parent agent's session (Claude calling
 # Codex as REVIEWER), not a new Codex session entry.
 set +e
-AGENT_ROLE=tool "$WRAPPER" --profile "$PROFILE" adversarial-plan "$ARTIFACT_ABS" --wait "$FOCUS" > "$OUTPUT" 2>&1
+AGENT_ROLE=tool "$WRAPPER" --profile "$PROFILE" adversarial-plan "$ARTIFACT_ABS" --wait "$REVIEW_FOCUS" > "$OUTPUT" 2>&1
 STATUS=$?
 set -e
 
 if [[ $STATUS -ne 0 ]]; then
-  log "$ARTIFACT_ABS" failed "exit=$STATUS output=$OUTPUT"
+  REASON="process-exit"
+  if grep -Eiq 'usage limit|quota|rate limit|try again|too many requests' "$OUTPUT"; then
+    REASON="quota"
+  fi
+  log "$ARTIFACT_ABS" failed "reason=$REASON exit=$STATUS output=$OUTPUT"
   echo "ERROR: Codex reverse review failed (exit=$STATUS); see $OUTPUT" >&2
   exit "$STATUS"
 fi
 
 LINE_COUNT="$(wc -l < "$OUTPUT" | tr -d '[:space:]')"
 if [[ "$LINE_COUNT" -lt 10 ]]; then
-  log "$ARTIFACT_ABS" malformed "line_count=$LINE_COUNT output=$OUTPUT"
+  log "$ARTIFACT_ABS" malformed "reason=too-short line_count=$LINE_COUNT output=$OUTPUT"
   echo "ERROR: Codex review output is too short to be a valid review report: $OUTPUT" >&2
+  exit 1
+fi
+
+if [[ "$LINE_COUNT" -gt 220 ]]; then
+  log "$ARTIFACT_ABS" malformed "reason=too-long line_count=$LINE_COUNT output=$OUTPUT"
+  echo "ERROR: Codex review output is too long for the artifact-review contract: $OUTPUT" >&2
   exit 1
 fi
 
 VERDICT="$(grep -E '^Verdict: (approve|needs-attention|block)$' "$OUTPUT" | tail -1 | sed 's/^Verdict: //' || true)"
 if [[ -z "$VERDICT" ]]; then
-  log "$ARTIFACT_ABS" malformed "output=$OUTPUT"
+  log "$ARTIFACT_ABS" malformed "reason=missing-verdict output=$OUTPUT"
   echo "ERROR: Codex review did not produce a valid verdict line: $OUTPUT" >&2
+  exit 1
+fi
+
+if ! grep -Fq "Artifact: $ARTIFACT_ABS" "$OUTPUT"; then
+  log "$ARTIFACT_ABS" malformed "reason=missing-artifact-path output=$OUTPUT"
+  echo "ERROR: Codex review did not identify the artifact path: $OUTPUT" >&2
+  exit 1
+fi
+
+for section in Evidence Gaps Risks; do
+  if ! grep -Eq "^${section}:$|^\\*\\*${section}\\*\\*" "$OUTPUT"; then
+    log "$ARTIFACT_ABS" malformed "reason=missing-section section=$section output=$OUTPUT"
+    echo "ERROR: Codex review is missing required section '$section': $OUTPUT" >&2
+    exit 1
+  fi
+done
+
+if ! grep -Eq '(^|[^[:alnum:]_./-])([[:alnum:]_.@/+:-]+:[0-9]+|command output|log line|screenshot|API response|database row)' "$OUTPUT"; then
+  log "$ARTIFACT_ABS" malformed "reason=missing-source-evidence output=$OUTPUT"
+  echo "ERROR: Codex review does not include source evidence: $OUTPUT" >&2
   exit 1
 fi
 
