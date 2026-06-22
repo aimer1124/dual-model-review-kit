@@ -31,6 +31,7 @@ shift
 FOCUS="Review this artifact as the independent REVIEWER (Adoption gate). Prioritize false-pass paths, missing evidence, publish/readiness claims, and whether the declared gate status is justified."
 OUTPUT=""
 REQUIRE_APPROVE=0
+CONFIRM_CLOSURE=0
 BUDGET="${CLAUDE_REVIEW_BUDGET_USD:-1.00}"
 MODEL="${CLAUDE_REVIEW_MODEL:-sonnet}"
 
@@ -48,6 +49,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --require-approve)
       REQUIRE_APPROVE=1
+      shift
+      ;;
+    --confirm-closure)
+      CONFIRM_CLOSURE=1
       shift
       ;;
     --budget)
@@ -76,6 +81,18 @@ fi
 ARTIFACT_ABS="$(cd "$(dirname "$ARTIFACT")" && pwd)/$(basename "$ARTIFACT")"
 SLUG="$(basename "$ARTIFACT_ABS" | sed 's/\.[^.]*$//' | tr -cs '[:alnum:]_-' '-' | sed 's/^-//; s/-$//')"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+
+# Review-loop round guard (verdict-reset on this artifact) — hard-blocks the 3rd
+# non-approve round per the review-loop stop-counter rule.
+_guard="$WORKSPACE/scripts/check-review-round-guard.sh"
+if [[ -x "$_guard" ]]; then
+  _gargs=(--key "$ARTIFACT_ABS" --mode verdict-reset)
+  if (( CONFIRM_CLOSURE )); then _gargs+=(--confirm-closure); fi
+  if ! "$_guard" "${_gargs[@]}"; then
+    echo "ERROR: review-round-guard blocked this round. Pass --confirm-closure for a closure round after a material change, or REVIEW_GUARD_DISABLE=1 to bypass." >&2
+    exit 3
+  fi
+fi
 
 if [[ -z "$OUTPUT" ]]; then
   OUTPUT="$WORKSPACE/worklog/claude-reviews/${STAMP}-${SLUG}.md"

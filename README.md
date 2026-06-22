@@ -34,6 +34,8 @@ dual-model-review-kit/
     codex-hook-log.sh
     check-codex-publish-gate.sh
     record-codex-audit-receipt.sh
+    check-review-round-guard.sh           # hard round-counter for the review-loop stop rule
+    review-round-guard-smoke.sh           # offline smoke test for the guard
   claude-hooks/
     set-active-binding.sh                 # SessionStart: writes .active-binding.md
     codex-auto-review.sh

@@ -145,6 +145,7 @@ PROJECT RULES - apply before doing anything below:
 7. Mark high-risk artifacts Draft until current review evidence shows Verdict: approve or an explicit owner override.
 8. Prefer narrow, evidence-grounded findings over broad speculation.
 9. Top-level Codex sessions must mark the binding before gate decisions: use this wrapper for companion work, or `scripts/enter-codex-session.sh codex-api` for API / in-app sessions. Sub-tool spawns must set `AGENT_ROLE=tool` so they preserve the parent binding.
+10. Review-loop stop counter: a review loop is hard-capped at R1 baseline + 1 rerun; the 3rd non-approve round is blocked by `scripts/check-review-round-guard.sh` unless `--confirm-closure` is passed for a closure round after a material change. On block, stop and escalate the unresolved disagreement instead of looping.
 
 ---
 
@@ -235,6 +236,29 @@ inject_prompt_args() {
 
 case "$SUBCMD" in
   task|adversarial-review)
+    # Review-loop round guard — adversarial-review ONLY (task exempt). --confirm-closure
+    # is a guard flag, not a companion flag, so strip it before forwarding.
+    if [[ "$SUBCMD" == "adversarial-review" ]]; then
+      _cc=0; _scope="default"; _filtered=(); _want_scope=0
+      for _a in "$@"; do
+        if (( _want_scope )); then _scope="$_a"; _want_scope=0; _filtered+=("$_a"); continue; fi
+        case "$_a" in
+          --confirm-closure) _cc=1 ;;
+          --scope) _want_scope=1; _filtered+=("$_a") ;;
+          --scope=*) _scope="${_a#--scope=}"; _filtered+=("$_a") ;;
+          *) _filtered+=("$_a") ;;
+        esac
+      done
+      set -- "${_filtered[@]+"${_filtered[@]}"}"
+      _guard="$WORKSPACE/scripts/check-review-round-guard.sh"
+      if [[ -x "$_guard" ]]; then
+        _gargs=(--key "adversarial-review:$_scope" --mode time-window)
+        if (( _cc )); then _gargs+=(--confirm-closure); fi
+        if ! "$_guard" "${_gargs[@]}"; then
+          exit 3
+        fi
+      fi
+    fi
     inject_prompt_args "$SUBCMD" "$@"
     ;;
   review|setup|status|result|cancel)

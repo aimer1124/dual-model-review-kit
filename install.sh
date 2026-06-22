@@ -32,6 +32,7 @@ copy_exec "$KIT_DIR/scripts/run-codex-chat-plan-review.sh" "$TARGET/scripts/run-
 copy_exec "$KIT_DIR/scripts/codex-hook-log.sh" "$TARGET/scripts/codex-hook-log.sh"
 copy_exec "$KIT_DIR/scripts/check-codex-publish-gate.sh" "$TARGET/scripts/check-codex-publish-gate.sh"
 copy_exec "$KIT_DIR/scripts/record-codex-audit-receipt.sh" "$TARGET/scripts/record-codex-audit-receipt.sh"
+copy_exec "$KIT_DIR/scripts/check-review-round-guard.sh" "$TARGET/scripts/check-review-round-guard.sh"
 
 copy_exec "$KIT_DIR/claude-hooks/codex-auto-review.sh" "$TARGET/.claude/hooks/codex-auto-review.sh"
 copy_exec "$KIT_DIR/claude-hooks/codex-preflight.sh" "$TARGET/.claude/hooks/codex-preflight.sh"
