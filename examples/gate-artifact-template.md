@@ -1,5 +1,9 @@
 # Gate Artifact Template
 
+<!-- Before each gate: paste the output of `python3 scripts/gate-trajectory.py <this file>` over the
+     gate status line and the trajectory table, then run `python3 scripts/gate-preflight.py <this file>`
+     and walk .claude/templates/author-preflight-checklist.md. -->
+
 Gate status: Draft
 Owner:
 Timestamp:
@@ -19,12 +23,20 @@ Adoption-gate verdict:
 - Commands run (and outputs):
 - Logs / screenshots / API responses / DB rows:
 
+## Gate Trajectory
+
+| Gate | Round | Verdict | Report |
+|---|---|---|---|
+| Exit | — | pending | — |
+| Adoption | — | pending | — |
+
 ## Exit Gate (PRIMARY self-adversarial)
 
 - Tool: (run-codex-with-context.sh adversarial-review | run-claude-self-adversarial.sh)
 - Job / report:
 - Verdict:
 - Material findings:
+- Fix-at-execution (findings below the verdict threshold, to fix while implementing):
 
 Exit gate `approve` unlocks "may start implementing / may deliver first pass". The artifact remains `Draft` even after Exit-gate approval.
 
@@ -51,5 +63,5 @@ Adoption gate `approve` unlocks "may publish externally / mark `Reviewed`". Exte
 ## Override (only if applicable)
 
 - Reason a gate was skipped:
-- Owner accepting the risk:
+- Owner accepting the risk (cite the record file, or a `user-override` row in `.codex-hook-log.tsv`):
 - Compensating control (manual review, follow-up ticket, etc.):

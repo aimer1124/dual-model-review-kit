@@ -8,12 +8,30 @@
 # author session.
 #
 # Usage:
-#   scripts/run-claude-self-adversarial.sh <artifact-path> [--focus "text"] [--output <path>] [--require-approve] [--budget <usd>] [--model <name>]
+#   scripts/run-claude-self-adversarial.sh <artifact-path> [--focus "text"] [--output <path>] [--require-approve] [--confirm-closure] [--budget <usd>] [--model <name>] [--skip-preflight "<reason>"]
 #
 # Output:
 #   Markdown report under worklog/claude-self-adversarial/<timestamp>-<slug>.md
 #   plus a row in .codex-hook-log.tsv with hook=claude-self-adversarial.
 #   Verdict line contract matches the Codex adversarial-review side.
+#   The review-complete row carries sha256=<bytes the reviewer was given> and
+#   rule=<EXIT_RULE_VERSION>, so an approve is bound to exact bytes and approve-rate
+#   metrics can be split at a rule change.
+#
+# Verdict threshold (EXIT_RULE_VERSION=d7-v1):
+#   needs-attention/block only for an H finding, or an M that affects correctness or a
+#   stated requirement; other M/L go under "Fix-at-execution" and the verdict is approve.
+#   The implementation-evidence rule stays a separate hard block outside the threshold.
+#   The Adoption-gate prompts are unchanged.
+#
+# Preflight: scripts/gate-preflight.py runs before the round guard (mode
+#   GATE_PREFLIGHT_MODE=warn|enforce, default warn). Enforce-mode findings exit 4
+#   without spending a round; an internal preflight error is logged and the gate
+#   continues. --skip-preflight logs a `gate-preflight skipped` row with the reason.
+#   GATE_PREFLIGHT_BIN replaces the preflight script path.
+#
+# Exit codes: 0 ok; 1 malformed/require-approve miss; 2 usage; 3 round-guard;
+#   4 preflight blocked (enforce mode); otherwise the reviewer's exit code.
 #
 # Notes:
 #   Single-turn, headless. Token budget capped via --max-budget-usd.
@@ -37,7 +55,7 @@ WORKSPACE="$(resolve_workspace)"
 LOG_HELPER="$WORKSPACE/scripts/codex-hook-log.sh"
 
 usage() {
-  sed -n '2,22p' "$0" >&2
+  sed -n '2,40p' "$0" >&2
 }
 
 if [[ $# -lt 1 ]]; then
@@ -54,6 +72,7 @@ REQUIRE_APPROVE=0
 CONFIRM_CLOSURE=0
 BUDGET="${CLAUDE_REVIEW_BUDGET_USD:-1.00}"
 MODEL="${CLAUDE_REVIEW_MODEL:-sonnet}"
+SKIP_PREFLIGHT=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -85,6 +104,16 @@ while [[ $# -gt 0 ]]; do
       MODEL="$2"
       shift 2
       ;;
+    --skip-preflight)
+      [[ $# -ge 2 && -n "$2" ]] || { echo "ERROR: --skip-preflight requires a reason" >&2; exit 2; }
+      SKIP_PREFLIGHT="$2"
+      shift 2
+      ;;
+    --skip-preflight=*)
+      SKIP_PREFLIGHT="${1#*=}"
+      [[ -n "$SKIP_PREFLIGHT" ]] || { echo "ERROR: --skip-preflight requires a reason" >&2; exit 2; }
+      shift
+      ;;
     *)
       echo "ERROR: unknown argument: $1" >&2
       usage
@@ -101,6 +130,24 @@ fi
 ARTIFACT_ABS="$(cd "$(dirname "$ARTIFACT")" && pwd)/$(basename "$ARTIFACT")"
 SLUG="$(basename "$ARTIFACT_ABS" | sed 's/\.[^.]*$//' | tr -cs '[:alnum:]_-' '-' | sed 's/^-//; s/-$//')"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+
+# Deterministic preflight. Runs BEFORE the round guard so a blocked preflight never
+# spends a review round. Fail-open on an internal error (logged as `error`): it is an
+# author aid, not a safety boundary. Same block in the two artifact-review scripts.
+if [[ -n "$SKIP_PREFLIGHT" ]]; then
+  [[ -x "$LOG_HELPER" ]] && "$LOG_HELPER" gate-preflight "$ARTIFACT_ABS" skipped "gate=exit reason=$SKIP_PREFLIGHT" || true
+  echo "preflight skipped: $SKIP_PREFLIGHT" >&2
+else
+  python3 "${GATE_PREFLIGHT_BIN:-$WORKSPACE/scripts/gate-preflight.py}" "$ARTIFACT_ABS" --gate exit --workspace "$WORKSPACE" >&2
+  _pfrc=$?
+  if [[ $_pfrc -eq 4 ]]; then
+    echo "ERROR: gate preflight blocked this review (no round spent). Fix the findings, or pass --skip-preflight \"<reason>\"." >&2
+    exit 4
+  elif [[ $_pfrc -ne 0 ]]; then
+    [[ -x "$LOG_HELPER" ]] && "$LOG_HELPER" gate-preflight "$ARTIFACT_ABS" error "gate=exit exit=$_pfrc" || true
+    echo "WARN: gate preflight failed internally (exit $_pfrc); continuing (fail-open)." >&2
+  fi
+fi
 
 # Review-loop round guard (verdict-reset on this artifact) — hard-blocks the 3rd
 # non-approve round per the review-loop stop-counter rule.
@@ -125,7 +172,14 @@ log() {
 }
 
 PROMPT="$(mktemp "${TMPDIR:-/tmp}/claude-self-adversarial.XXXXXX.md")"
-trap 'rm -f "$PROMPT"' EXIT
+# Snapshot the artifact once: the prompt embeds these bytes and the review-complete
+# row records their sha256, so the logged hash is what the reviewer actually saw even
+# if the file is edited while the review runs.
+SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/claude-self-adversarial-artifact.XXXXXX")"
+trap 'rm -f "$PROMPT" "$SNAPSHOT"' EXIT
+cp "$ARTIFACT_ABS" "$SNAPSHOT"
+REVIEWED_SHA="$(shasum -a 256 "$SNAPSHOT" | awk '{print $1}')"
+EXIT_RULE_VERSION="d7-v1"
 
 {
   cat <<EOF
@@ -138,7 +192,8 @@ Focus:
 $FOCUS
 
 Review rules:
-- Do not approve unless you actively cannot find a scope miss, fabricated infrastructure, missing evidence, or unjustified claim.
+- Actively look for scope misses, fabricated infrastructure, missing evidence, and unjustified claims, and report every one you find.
+- Verdict threshold: return needs-attention or block only if at least one finding is H, or an M that affects correctness or a stated requirement of the artifact. Every other M/L finding goes under "Fix-at-execution" and the verdict is approve. Say in each M finding whether it affects correctness or a stated requirement, and why. The implementation-evidence rule below is separate and is not subject to this threshold.
 - Cite file:line for every concrete claim you make; if you cannot, downgrade the finding to L.
 - Classify each finding H / M / L.
 - If the artifact requires implementation evidence (commands run, files modified, tests passed) and that evidence is absent or unverifiable, do not approve.
@@ -147,9 +202,10 @@ Review rules:
 Required output:
 1. Scope read (what you understood the artifact is trying to do).
 2. Findings, ordered by severity (H first).
-3. Required deltas before the author may ExitPlanMode.
-4. Evidence you actually checked (with file:line).
-5. End with exactly one line:
+3. Required deltas before the author may ExitPlanMode (only the findings that set a non-approve verdict).
+4. Fix-at-execution (M/L findings below the verdict threshold; write "none" if empty).
+5. Evidence you actually checked (with file:line).
+6. End with exactly one line:
    Verdict: approve
    OR
    Verdict: needs-attention
@@ -158,7 +214,7 @@ Required output:
 
 Artifact body:
 EOF
-  cat "$ARTIFACT_ABS"
+  cat "$SNAPSHOT"
 } > "$PROMPT"
 
 log "$ARTIFACT_ABS" queued "output=$OUTPUT model=$MODEL"
@@ -198,7 +254,7 @@ if [[ -z "$VERDICT" ]]; then
   exit 1
 fi
 
-log "$ARTIFACT_ABS" review-complete "verdict=$VERDICT output=$OUTPUT"
+log "$ARTIFACT_ABS" review-complete "verdict=$VERDICT output=$OUTPUT sha256=$REVIEWED_SHA rule=$EXIT_RULE_VERSION"
 
 echo "Claude self-adversarial written: $OUTPUT"
 echo "Verdict: $VERDICT"
