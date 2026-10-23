@@ -36,12 +36,17 @@ dual-model-review-kit/
     record-codex-audit-receipt.sh
     check-review-round-guard.sh           # hard round-counter for the review-loop stop rule
     review-round-guard-smoke.sh           # offline smoke test for the guard
+    gate-preflight.py                     # deterministic checks before a gate round (PF-01..09)
+    gate-trajectory.py                    # gate status line + trajectory table from the hook log
+    scope-inventory.sh                    # root + nested-repo enumeration for "only N" claims
+    gate-preflight-smoke.sh               # offline smoke test for the preflight, trajectory, D7 and wiring
   claude-hooks/
     set-active-binding.sh                 # SessionStart: writes .active-binding.md
     codex-auto-review.sh
     codex-preflight.sh
   claude-templates/
     codex-adversarial-plan.md
+    author-preflight-checklist.md
   examples/
     gate-artifact-template.md
   LICENSE
@@ -52,6 +57,7 @@ dual-model-review-kit/
 
 - A git repository.
 - `node` available on `PATH`.
+- `python3` (3.9+) for the gate preflight and trajectory scripts. Without it the gates still run: the preflight fails open and logs an `error` row.
 - Claude CLI available as `claude`.
 - Codex companion script available through the Claude Code Codex plugin, or set `CX_SCRIPT=/absolute/path/to/codex-companion.mjs`.
 - Optional: a repository-specific `.codex-context.md` and `scripts/export-codex-context.sh`. The Codex entry scripts work without them, but context refresh is skipped.
@@ -102,6 +108,7 @@ Also add to your project `.gitignore`:
 worklog/claude-reviews/
 worklog/codex-reviews/
 worklog/claude-self-adversarial/
+worklog/preflight/
 ```
 
 ## Active Binding
@@ -212,6 +219,14 @@ Adoption gate when `REVIEWER=Codex` (inverted binding):
 scripts/run-codex-artifact-review.sh docs/plans/example.md --require-approve
 ```
 
+Before requesting either gate, run the deterministic preflight and paste the derived gate status:
+
+```bash
+python3 scripts/gate-preflight.py docs/plans/example.md
+python3 scripts/gate-trajectory.py docs/plans/example.md     # --format html|md|tsv
+scripts/scope-inventory.sh --pattern 'old_function\(' --slug old-function-callers
+```
+
 Adoption gate for a chat plan when `REVIEWER=Codex`:
 
 ```bash
@@ -235,6 +250,56 @@ Resolve the right tool from the binding, not from hard-coded model names:
 | Exit gate                     | `run-codex-with-context.sh adversarial-review` (or `adversarial-plan` for plan files) | `run-claude-self-adversarial.sh`          |
 | Adoption gate — saved file    | `run-claude-artifact-review.sh`                              | `run-codex-artifact-review.sh`            |
 | Adoption gate — chat plan     | Claude session-side review skill / repeat through saved file | `run-codex-chat-plan-review.sh`           |
+
+## Exit-Gate Verdict Threshold
+
+`run-claude-self-adversarial.sh` applies a materiality threshold (rule `d7-v1`): the reviewer returns `needs-attention` or `block` only for an H finding, or an M finding that affects correctness or a stated requirement of the artifact. Every other M/L finding is listed under a `Fix-at-execution` section and the verdict is `approve`. The implementation-evidence rule (claimed commands, files or tests that are absent or unverifiable) stays a hard block outside the threshold. The Adoption-gate prompts keep their stricter bar. The Codex Exit paths are unchanged: `adversarial-review` uses the companion's built-in prompt, and `adversarial-plan` renders `codex-adversarial-plan.md`, which is also the channel `run-codex-artifact-review.sh` uses for Adoption, so a threshold there would loosen the Adoption gate too.
+
+The Exit prompt embeds a snapshot of the artifact, and its `review-complete` row records `sha256=<snapshot>` and `rule=d7-v1`, so an approve is bound to exact bytes and approve rates can be split at a rule change. Both Adoption scripts record `sha256=` as well.
+
+## Gate Preflight
+
+The three artifact gate scripts (`run-claude-self-adversarial.sh`, `run-claude-artifact-review.sh`, `run-codex-artifact-review.sh`) run `scripts/gate-preflight.py` before their round guard:
+
+| Mode | Behavior |
+| --- | --- |
+| `warn` (default) | findings are printed and logged as a `warn` row; the review continues |
+| `GATE_PREFLIGHT_MODE=enforce` | findings exit `4` before the round guard, so no review round is spent |
+| internal error (exit ≠ 0/4, or no `python3`) | logged as an `error` row; the review continues (fail-open: the preflight is an author aid, not a safety boundary) |
+| `--skip-preflight "<reason>"` | no preflight; a `skipped` row records the reason |
+
+Checks (code spans only — `<code>` in html, backticks in Markdown; quotes, `<del>` and `class="historical"` blocks are skipped):
+
+| Check | Fires when |
+| --- | --- |
+| PF-01 | a cited local path does not exist (a block that says it creates the path is exempt) |
+| PF-02 | `path:N` / `path:N-M` is past the end of a root-repo file |
+| PF-03 | an evidence path sits under `/tmp` or `/private/tmp` |
+| PF-04 | a full sha256 matches no cited file, hook-log row or record file |
+| PF-05 | `origin/<ref>:<path>:<n>` has no record-dir evidence file containing that path |
+| PF-06 | `Gate status: Reviewed` or the trajectory table disagrees with the hook log (via `gate-trajectory.py`) |
+| PF-07 | a past-tense owner authorization / Override has no record file and no `user-override` row |
+| PF-08 | an "only N / all N" count sits in a section that cites no evidence file |
+| PF-09 | the optional `GATE_PREFLIGHT_PLAN_LINT` command fails on the artifact |
+
+A pass proves existence, range and citation only — not that the cited content supports the claim. `claude-templates/author-preflight-checklist.md` tags which checklist items the preflight covers.
+
+Configuration:
+
+```bash
+GATE_PREFLIGHT_MODE=warn                 # or enforce
+GATE_PREFLIGHT_BIN=scripts/gate-preflight.py
+GATE_PREFLIGHT_REPORT_DIR=               # default <repo>/worklog/preflight/
+GATE_RECORD_DIR=worklog                  # durable records (PF-04/05/07)
+GATE_EVIDENCE_DIR=worklog/evidence       # what a count claim must cite (PF-08, scope-inventory.sh)
+GATE_PREFLIGHT_SUBREPOS=auto             # off: ignore <repo>/*/.git nested checkouts
+GATE_PREFLIGHT_LINECHECK_SUBREPOS=       # nested repos whose file:line anchors PF-02 checks
+GATE_PREFLIGHT_PLAN_LINT=                # optional "<cmd>" run as <cmd> <artifact>
+GATE_PATH_ROOTS=                         # old absolute roots (colon-separated) after a checkout move
+GATE_EXIT_HOOKS= GATE_ADOPTION_HOOKS=    # extra hook names that count as Exit / Adoption rounds
+```
+
+`gate-trajectory.py` reads `.codex-hook-log.tsv` (plus `.codex-hook-log-archive.tsv` when present) and prints the gate status line and a Gate / Round / Verdict / Report table for an artifact; a round allowed under `--confirm-closure` is labelled `(closure)`. `Reviewed` requires an Exit approve or owner Override plus an Adoption approve whose `sha256=` equals the current bytes. Paste its output instead of typing the trajectory; PF-06 compares the two.
 
 ## Gate Artifact Status
 
@@ -283,7 +348,10 @@ Hook tags emitted by this kit:
 - `wrapper` — `run-codex-with-context.sh` invocations.
 - `claude-artifact-review` — Adoption gate, REVIEWER=Claude.
 - `codex-artifact-review` — Adoption gate, REVIEWER=Codex.
-- `claude-self-adversarial` — Exit gate, PRIMARY=Claude.
+- `claude-self-adversarial` — Exit gate, PRIMARY=Claude (`sha256=` + `rule=` on `review-complete`).
+- `round-guard` — `check-review-round-guard.sh` round counter.
+- `gate-preflight` — preflight result (`pass` / `warn` / `blocked` / `skipped` / `error`, note `gate= mode= findings= checks= sha256= report=`). These rows never count as review rounds.
+- `user-override` action rows (written by hand or by your own tooling) are read by `gate-trajectory.py` as an owner Override for that artifact.
 
 For external publish flows that need an extra receipt:
 

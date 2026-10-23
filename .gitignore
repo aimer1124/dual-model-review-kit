@@ -4,6 +4,7 @@
 worklog/claude-reviews/
 worklog/codex-reviews/
 worklog/claude-self-adversarial/
+worklog/preflight/
 *.bak.*
 *.tar
 *.tar.gz
@@ -11,3 +12,4 @@ worklog/claude-self-adversarial/
 .DS_Store
 ._*
 __MACOSX/
+__pycache__/

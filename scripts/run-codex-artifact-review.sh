@@ -10,7 +10,7 @@
 # without polluting the prompt with working-tree git diffs.
 #
 # Usage:
-#   scripts/run-codex-artifact-review.sh <artifact-path> [--focus "text"] [--output <path>] [--require-approve] [--profile <name>]
+#   scripts/run-codex-artifact-review.sh <artifact-path> [--focus "text"] [--output <path>] [--require-approve] [--confirm-closure] [--profile <name>] [--skip-preflight "<reason>"]
 #
 # Intended scope:
 #   Same as the Claude-side counterpart — high-risk artifacts only (formal
@@ -19,7 +19,18 @@
 #
 # Output:
 #   Markdown report under worklog/codex-reviews/<timestamp>-<slug>.md and a
-#   row in .codex-hook-log.tsv with hook=codex-artifact-review.
+#   row in .codex-hook-log.tsv with hook=codex-artifact-review. The review-complete
+#   row carries sha256= of the artifact bytes hashed right before Codex reads the
+#   path (Codex reads the file itself, so an edit during the review is not caught).
+#
+# Preflight: scripts/gate-preflight.py runs before the round guard (mode
+#   GATE_PREFLIGHT_MODE=warn|enforce, default warn). Enforce-mode findings exit 4
+#   without spending a round; an internal preflight error is logged and the review
+#   continues. --skip-preflight logs a `gate-preflight skipped` row with the reason.
+#   GATE_PREFLIGHT_BIN replaces the preflight script path.
+#
+# Exit codes: 0 ok; 1 malformed/require-approve miss; 2 usage; 3 round-guard;
+#   4 preflight blocked (enforce mode); otherwise the reviewer's exit code.
 
 set -uo pipefail
 
@@ -38,7 +49,7 @@ LOG_HELPER="$WORKSPACE/scripts/codex-hook-log.sh"
 WRAPPER="$WORKSPACE/scripts/run-codex-with-context.sh"
 
 usage() {
-  sed -n '2,21p' "$0" >&2
+  sed -n '2,33p' "$0" >&2
 }
 
 if [[ $# -lt 1 ]]; then
@@ -53,6 +64,7 @@ FOCUS="Review this artifact as the independent REVIEWER (Adoption gate, reverse-
 OUTPUT=""
 REQUIRE_APPROVE=0
 CONFIRM_CLOSURE=0
+SKIP_PREFLIGHT=""
 PROFILE="${CODEX_REVIEW_PROFILE:-default}"
 
 while [[ $# -gt 0 ]]; do
@@ -80,6 +92,16 @@ while [[ $# -gt 0 ]]; do
       PROFILE="$2"
       shift 2
       ;;
+    --skip-preflight)
+      [[ $# -ge 2 && -n "$2" ]] || { echo "ERROR: --skip-preflight requires a reason" >&2; exit 2; }
+      SKIP_PREFLIGHT="$2"
+      shift 2
+      ;;
+    --skip-preflight=*)
+      SKIP_PREFLIGHT="${1#*=}"
+      [[ -n "$SKIP_PREFLIGHT" ]] || { echo "ERROR: --skip-preflight requires a reason" >&2; exit 2; }
+      shift
+      ;;
     *)
       echo "ERROR: unknown argument: $1" >&2
       usage
@@ -101,6 +123,24 @@ fi
 ARTIFACT_ABS="$(cd "$(dirname "$ARTIFACT")" && pwd)/$(basename "$ARTIFACT")"
 SLUG="$(basename "$ARTIFACT_ABS" | sed 's/\.[^.]*$//' | tr -cs '[:alnum:]_-' '-' | sed 's/^-//; s/-$//')"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+
+# Deterministic preflight. Runs BEFORE the round guard so a blocked preflight never
+# spends a review round. Fail-open on an internal error (logged as `error`): it is an
+# author aid, not a safety boundary. Same block in run-claude-self-adversarial.sh.
+if [[ -n "$SKIP_PREFLIGHT" ]]; then
+  [[ -x "$LOG_HELPER" ]] && "$LOG_HELPER" gate-preflight "$ARTIFACT_ABS" skipped "gate=adoption reason=$SKIP_PREFLIGHT" || true
+  echo "preflight skipped: $SKIP_PREFLIGHT" >&2
+else
+  python3 "${GATE_PREFLIGHT_BIN:-$WORKSPACE/scripts/gate-preflight.py}" "$ARTIFACT_ABS" --gate adoption --workspace "$WORKSPACE" >&2
+  _pfrc=$?
+  if [[ $_pfrc -eq 4 ]]; then
+    echo "ERROR: gate preflight blocked this review (no round spent). Fix the findings, or pass --skip-preflight \"<reason>\"." >&2
+    exit 4
+  elif [[ $_pfrc -ne 0 ]]; then
+    [[ -x "$LOG_HELPER" ]] && "$LOG_HELPER" gate-preflight "$ARTIFACT_ABS" error "gate=adoption exit=$_pfrc" || true
+    echo "WARN: gate preflight failed internally (exit $_pfrc); continuing (fail-open)." >&2
+  fi
+fi
 
 # Review-loop round guard (verdict-reset on this artifact) — hard-blocks the 3rd
 # non-approve round per the review-loop stop-counter rule.
@@ -149,6 +189,7 @@ EOF
 # AGENT_ROLE=tool tells the wrapper NOT to overwrite .active-binding.md.
 # This is a sub-tool spawn from the parent agent's session (Claude calling
 # Codex as REVIEWER), not a new Codex session entry.
+REVIEWED_SHA="$(shasum -a 256 "$ARTIFACT_ABS" | awk '{print $1}')"
 set +e
 AGENT_ROLE=tool "$WRAPPER" --profile "$PROFILE" adversarial-plan "$ARTIFACT_ABS" --wait "$REVIEW_FOCUS" > "$OUTPUT" 2>&1
 STATUS=$?
@@ -204,7 +245,7 @@ if ! grep -Eq '(^|[^[:alnum:]_./-])([[:alnum:]_.@/+:-]+:[0-9]+|command output|lo
   exit 1
 fi
 
-log "$ARTIFACT_ABS" review-complete "verdict=$VERDICT output=$OUTPUT"
+log "$ARTIFACT_ABS" review-complete "verdict=$VERDICT output=$OUTPUT sha256=$REVIEWED_SHA"
 
 echo "Codex review written: $OUTPUT"
 echo "Verdict: $VERDICT"

@@ -23,7 +23,12 @@ Expected result:
 
 ```bash
 bash -n dual-model-review-kit/install.sh dual-model-review-kit/scripts/*.sh dual-model-review-kit/claude-hooks/*.sh
+python3 -m py_compile dual-model-review-kit/scripts/*.py
+bash dual-model-review-kit/scripts/review-round-guard-smoke.sh
+bash dual-model-review-kit/scripts/gate-preflight-smoke.sh
 ```
+
+Both smoke tests are offline and hermetic (temp logs / a temp install, a stub reviewer).
 
 ## Archive Guidance
 
